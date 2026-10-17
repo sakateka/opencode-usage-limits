@@ -1,0 +1,279 @@
+import { Effect, Redacted, Result, Schema } from "effect";
+
+import { ConfigDecodeError } from "@/errors.ts";
+import type { OpenCodeAuth, ResolvedUsageLimitsConfig } from "@/types.ts";
+import { isRecord } from "@/utils.ts";
+import type { JsonValue } from "@/utils.ts";
+
+type ParsedCredential = Redacted.Redacted<string> | string;
+
+interface ParsedAuthEntry {
+  apiKey?: ParsedCredential;
+  key?: ParsedCredential;
+}
+
+interface ParsedOpenAIEntry {
+  access?: ParsedCredential;
+  accountId?: ParsedCredential;
+}
+
+type OpenCodeAuthBuilder = {
+  -readonly [Key in keyof OpenCodeAuth]?: OpenCodeAuth[Key];
+};
+
+const defaultKey = <S extends Schema.Top>(schema: S, value: S["Encoded"]) =>
+  schema.pipe(Schema.withDecodingDefaultKey(Effect.succeed(value)));
+
+const secret = Schema.RedactedFromValue(Schema.String, {
+  disallowEncode: true,
+  label: "credential",
+});
+
+const commonProviderFields = {
+  enabled: Schema.optionalKey(Schema.Boolean),
+  footerWindow: defaultKey(
+    Schema.Literals([
+      "auto",
+      "rolling",
+      "daily",
+      "weekly",
+      "monthly",
+      "credits",
+      "other",
+    ]),
+    "auto"
+  ),
+  label: Schema.optionalKey(Schema.String),
+  showFooterBar: defaultKey(Schema.Boolean, true),
+  showSidebarBar: defaultKey(Schema.Boolean, true),
+  sidebarWindow: defaultKey(
+    Schema.Literals([
+      "all",
+      "rolling",
+      "daily",
+      "weekly",
+      "monthly",
+      "credits",
+      "other",
+    ]),
+    "all"
+  ),
+};
+
+/** Schema for Codex provider configuration. */
+const codexProviderConfigSchema = Schema.Struct({
+  ...commonProviderFields,
+  apiKey: Schema.optionalKey(secret),
+  authPath: Schema.optionalKey(Schema.String),
+  authorizationScheme: Schema.optionalKey(Schema.Literals(["raw", "bearer"])),
+  baseUrl: Schema.optionalKey(Schema.String),
+});
+
+/** Schema for ZAI provider configuration. */
+const zaiProviderConfigSchema = Schema.Struct({
+  ...commonProviderFields,
+  apiKey: Schema.optionalKey(secret),
+  authPath: Schema.optionalKey(Schema.String),
+  authorizationScheme: Schema.optionalKey(Schema.Literals(["raw", "bearer"])),
+});
+
+/** Schema for OpenCode GO provider configuration. */
+const openCodeGoProviderConfigSchema = Schema.Struct({
+  ...commonProviderFields,
+  apiKey: Schema.optionalKey(secret),
+  authPath: Schema.optionalKey(Schema.String),
+  baseUrl: Schema.optionalKey(Schema.String),
+});
+
+const providersSchema = Schema.Struct({
+  kimi: Schema.optionalKey(Schema.Struct({
+    ...commonProviderFields,
+    apiKey: Schema.optionalKey(secret),
+    authPath: Schema.optionalKey(Schema.String),
+  })),
+  codex: Schema.optionalKey(codexProviderConfigSchema),
+  "opencode-go": Schema.optionalKey(openCodeGoProviderConfigSchema),
+  zai: Schema.optionalKey(zaiProviderConfigSchema),
+});
+
+const configSchema = Schema.Struct({
+  $schema: Schema.optionalKey(Schema.String),
+  enabled: defaultKey(Schema.Boolean, true),
+  providers: defaultKey(providersSchema, {}),
+  refreshIntervalSeconds: defaultKey(
+    Schema.Finite.check(Schema.isGreaterThanOrEqualTo(15)),
+    60
+  ),
+  requestTimeoutMs: defaultKey(
+    Schema.Finite.check(Schema.isGreaterThanOrEqualTo(1000)),
+    10_000
+  ),
+  showErrors: defaultKey(Schema.Boolean, true),
+});
+
+const decodeConfig = Schema.decodeUnknownResult(configSchema, {
+  errors: "all",
+  onExcessProperty: "error",
+});
+
+const decodeCredential = Schema.decodeUnknownResult(secret);
+
+const parseCredential = (input: JsonValue | undefined) => {
+  const result = decodeCredential(input);
+
+  return Result.isSuccess(result) ? result.success : undefined;
+};
+
+const parseAuthEntry = (
+  input: JsonValue | undefined
+): ParsedAuthEntry | undefined => {
+  if (!isRecord(input)) {
+    return;
+  }
+
+  const apiKey = parseCredential(input.apiKey);
+  const key = parseCredential(input.key);
+
+  if (!(apiKey || key)) {
+    return undefined;
+  }
+
+  const entry: ParsedAuthEntry = {};
+
+  if (apiKey) {
+    entry.apiKey = apiKey;
+  }
+
+  if (key) {
+    entry.key = key;
+  }
+
+  return entry;
+};
+
+const parseOpenAIEntry = (
+  input: JsonValue | undefined
+): ParsedOpenAIEntry | undefined => {
+  if (!isRecord(input)) {
+    return;
+  }
+
+  const access = parseCredential(input.access);
+  const accountId = parseCredential(input.accountId);
+
+  if (!(access || accountId)) {
+    return undefined;
+  }
+
+  const entry: ParsedOpenAIEntry = {};
+
+  if (access) {
+    entry.access = access;
+  }
+
+  if (accountId) {
+    entry.accountId = accountId;
+  }
+
+  return entry;
+};
+
+/**
+ * Validates user configuration and applies the plugin's defaults.
+ *
+ * @param input - Parsed JSON-compatible configuration value.
+ * @returns The resolved configuration, or a typed decoding failure.
+ */
+export const parseUsageLimitsConfig = (
+  input: JsonValue
+): Result.Result<ResolvedUsageLimitsConfig, ConfigDecodeError> => {
+  const result = decodeConfig(input);
+
+  if (Result.isFailure(result)) {
+    return Result.fail(
+      new ConfigDecodeError({
+        cause: "schema",
+        operation: "parse-config",
+      })
+    );
+  }
+
+  const config = { ...result.success };
+  delete config.$schema;
+
+  return Result.succeed(config);
+};
+
+/**
+ * Extracts supported credentials from an OpenCode auth-file value.
+ *
+ * Unsupported or malformed fields are ignored; credential values remain
+ * redacted until a provider adapter explicitly needs their raw form.
+ *
+ * @param input - Parsed JSON-compatible auth-file value.
+ * @returns Recognized credentials, or an empty object when none are usable.
+ */
+export const parseOpenCodeAuth = (input: JsonValue): OpenCodeAuth => {
+  if (!isRecord(input)) {
+    return {};
+  }
+
+  const openai = parseOpenAIEntry(input.openai);
+  const zai = parseAuthEntry(input.zai);
+  const zaiCodingPlan = parseAuthEntry(input["zai-coding-plan"]);
+  const openCodeGo = parseAuthEntry(input["opencode-go"]);
+  const opencode = parseAuthEntry(input.opencode);
+  const direct = parseAuthEntry(input);
+
+  const auth: OpenCodeAuthBuilder = direct ?? {};
+  const kimi = parseAuthEntry(input["kimi-code-plan-global"]);
+  if (kimi) {
+    auth["kimi-code-plan-global"] = kimi;
+  }
+
+  if (openai) {
+    auth.openai = openai;
+  }
+
+  if (zai) {
+    auth.zai = zai;
+  }
+
+  if (zaiCodingPlan) {
+    auth["zai-coding-plan"] = zaiCodingPlan;
+  }
+
+  if (openCodeGo) {
+    auth["opencode-go"] = openCodeGo;
+  }
+
+  if (opencode) {
+    auth.opencode = opencode;
+  }
+
+  return auth;
+};
+
+/**
+ * Validates and reveals a credential for a provider adapter boundary.
+ *
+ * @param credential - Raw or redacted credential value to validate.
+ * @returns A trimmed non-empty credential, or `undefined` when invalid/empty.
+ */
+export const credentialValue = (
+  credential: JsonValue | Redacted.Redacted<string> | undefined
+): string | undefined => {
+  const value = Redacted.isRedacted(credential)
+    ? Redacted.value(credential)
+    : credential;
+
+  const result = decodeCredential(value);
+
+  if (Result.isFailure(result)) {
+    return undefined;
+  }
+
+  const trimmed = Redacted.value(result.success).trim();
+
+  return trimmed === "" ? undefined : trimmed;
+};

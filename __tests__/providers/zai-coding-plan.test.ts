@@ -1,0 +1,417 @@
+import { rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { fetchZaiCodingPlanUsage } from "@/providers/zai-coding-plan.ts";
+import type { OpenCodeAuth } from "@/types.ts";
+
+import { installFetchMock, resetFetchMock } from "./helpers.ts";
+
+const authCases = [
+  ["direct key", { key: "direct-key" }],
+  ["direct apiKey", { apiKey: "direct-key" }],
+  ["zai-coding-plan", { "zai-coding-plan": { key: "plan-key" } }],
+] satisfies readonly (readonly [string, OpenCodeAuth])[];
+
+describe("ZAI provider", () => {
+  afterEach(resetFetchMock);
+
+  it("parses credit-based rolling and weekly quotas using reported totals", async () => {
+    const nextResetTime = Date.now() + 90_000;
+    installFetchMock(Response.json({
+      data: {
+        limits: [
+          { type: "CREDIT_LIMIT", unit: 3, number: 5, usage: 10000,
+            currentValue: 3000, percentage: 30, nextResetTime },
+          { type: "CREDIT_LIMIT", unit: 6, number: 1, usage: 40000,
+            currentValue: 12000, percentage: 30, nextResetTime },
+        ],
+      },
+    }));
+
+    const usage = await fetchZaiCodingPlanUsage(undefined, { zai: { key: "key" } }, 1000);
+
+    expect(usage.tierName).toBeUndefined();
+    expect(usage.windows).toMatchObject([
+      { kind: "rolling", label: "5h", quota: {
+        _tag: "Count", current: 3000, total: 10000, usedPercent: 30,
+      } },
+      { kind: "weekly", label: "weekly", quota: {
+        _tag: "Count", current: 12000, total: 40000, usedPercent: 30,
+      } },
+    ]);
+    expect(usage.windows.map(w => w.resetsAt?.getTime())).toStrictEqual([
+      nextResetTime, nextResetTime,
+    ]);
+  });
+
+  it("preserves zero credit usage and ignores unsupported credit windows", async () => {
+    installFetchMock(Response.json({ data: { limits: [
+      { type: "CREDIT_LIMIT", unit: 3, number: 5, usage: 12000,
+        currentValue: 0, percentage: 0 },
+      { type: "CREDIT_LIMIT", unit: 99, number: 1, percentage: 50 },
+    ] } }));
+
+    const usage = await fetchZaiCodingPlanUsage(undefined, { zai: { key: "key" } }, 1000);
+    expect(usage.windows).toHaveLength(1);
+    expect(usage.windows[0]?.quota).toMatchObject({
+      _tag: "Count", current: 0, total: 12000, usedPercent: 0,
+    });
+  });
+
+  it("rejects credit payloads without a recognized rolling window", async () => {
+    installFetchMock(Response.json({ data: { limits: [
+      { type: "CREDIT_LIMIT", unit: 99, number: 5, percentage: 26 },
+    ] } }));
+    await expect(fetchZaiCodingPlanUsage(undefined, { zai: { key: "key" } }, 1000))
+      .rejects.toMatchObject({ _tag: "ProviderResponseDecodeError" });
+  });
+
+  it.each([
+    ["valid", JSON.stringify({ zai: { key: "file-key" } }), "file-key"],
+    ["missing", undefined, "auth-key"],
+    ["malformed", "{", "auth-key"],
+  ])(
+    "uses the %s configured auth file or falls back to OpenCode auth",
+    async (_kind, contents, expectedKey) => {
+      const authPath = path.join(
+        tmpdir(),
+        `oc-usage-limits-${crypto.randomUUID()}.json`
+      );
+
+      if (contents !== undefined) {
+        await writeFile(authPath, contents);
+      }
+
+      try {
+        const fetchMock = installFetchMock(
+          Response.json({
+            data: {
+              limits: [{ percentage: 50, type: "TOKENS_LIMIT", usage: 50 }],
+            },
+          })
+        );
+
+        await fetchZaiCodingPlanUsage(
+          { authPath },
+          { zai: { key: "auth-key" } },
+          1000
+        );
+
+        expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+          headers: { Authorization: expectedKey },
+        });
+      } finally {
+        await rm(authPath, { force: true });
+      }
+    }
+  );
+
+  it("prefers auth data, sends bearer tokens when configured, and infers Max tier", async () => {
+    const nextResetTime = Date.now() + 90_000;
+
+    const fetchMock = installFetchMock(
+      Response.json({
+        data: {
+          limits: [
+            {
+              currentValue: 4440,
+              nextResetTime,
+              percentage: 44.4,
+              type: "TOKENS_LIMIT",
+            },
+            {
+              currentValue: 25,
+              percentage: 75,
+              type: "TIME_LIMIT",
+              usage: 1500,
+            },
+            { type: "UNKNOWN_LIMIT" },
+          ],
+        },
+      })
+    );
+
+    const usage = await fetchZaiCodingPlanUsage(
+      {
+        apiKey: "config-key",
+        authorizationScheme: "bearer",
+        label: "Zed",
+      },
+      { zai: { key: "auth-key" } },
+      1000
+    );
+
+    const [request] = fetchMock.mock.calls;
+    expect({
+      init: request?.[1],
+      url: request?.[0],
+      usage: {
+        id: usage.id,
+        label: usage.label,
+        tierName: usage.tierName,
+        windows: usage.windows.map((window) => ({
+          label: window.label,
+          quota: window.quota,
+        })),
+      },
+    }).toMatchObject({
+      init: {
+        headers: { Authorization: "Bearer auth-key" },
+        method: "GET",
+      },
+      url: "https://api.z.ai/api/monitor/usage/quota/limit",
+      usage: {
+        id: "zai",
+        label: "Zed",
+        tierName: "Max",
+        windows: [
+          {
+            label: "5h",
+            quota: {
+              current: 4440,
+              remainingPercent: 55.6,
+              total: 10_000,
+              usedPercent: 44.4,
+            },
+          },
+        ],
+      },
+    });
+    expect(usage.windows[0]?.resetsAt?.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("uses configured environment references when auth does not contain a key", async () => {
+    process.env.OC_USAGE_LIMITS_ZAI_KEY = "env-key";
+
+    const fetchMock = installFetchMock(
+      Response.json({
+        data: {
+          limits: [{ percentage: 50, type: "TOKENS_LIMIT", usage: 50 }],
+        },
+      })
+    );
+
+    await fetchZaiCodingPlanUsage(
+      { apiKey: "{env:OC_USAGE_LIMITS_ZAI_KEY}" },
+      {},
+      1000
+    );
+
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: { Authorization: "env-key" },
+    });
+  });
+
+  it("ignores malformed optional fields while retaining valid token limits", async () => {
+    installFetchMock(
+      Response.json({
+        data: {
+          limits: [
+            { percentage: 50, type: 42, usage: 10 },
+            { percentage: 50, type: "TOKENS_LIMIT", usage: "invalid" },
+          ],
+        },
+      })
+    );
+
+    const usage = await fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000);
+
+    expect(usage.windows[0]?.quota).toMatchObject({ usedPercent: 50 });
+    expect(usage.tierName).toBeUndefined();
+  });
+
+  it.each(authCases)(
+    "accepts %s OpenCode auth",
+    async (_name, openCodeAuth) => {
+      const fetchMock = installFetchMock(
+        Response.json({
+          data: {
+            limits: [{ percentage: 50, type: "TOKENS_LIMIT", usage: 50 }],
+          },
+        })
+      );
+
+      await fetchZaiCodingPlanUsage(undefined, openCodeAuth, 1000);
+
+      expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+        headers: {
+          Authorization:
+            "zai-coding-plan" in openCodeAuth ? "plan-key" : "direct-key",
+        },
+      });
+    }
+  );
+
+  describe("tier inference", () => {
+    it.each([
+      [1400, "Max"],
+      [1500, "Max"],
+      [2000, "Max"],
+      [9999, "Max"],
+    ] as const)(
+      "infers %s total prompts as Max tier",
+      async (usageTotal, tierName) => {
+        installFetchMock(
+          Response.json({
+            data: {
+              limits: [
+                { percentage: 50, type: "TOKENS_LIMIT", usage: 50 },
+                { percentage: 1, type: "TIME_LIMIT", usage: usageTotal },
+              ],
+            },
+          })
+        );
+
+        await expect(
+          fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000)
+        ).resolves.toMatchObject({ tierName });
+      }
+    );
+
+    it.each([
+      [300, "Pro"],
+      [500, "Pro"],
+      [1000, "Pro"],
+      [1399, "Pro"],
+    ] as const)(
+      "infers %s total prompts as Pro tier",
+      async (usageTotal, tierName) => {
+        installFetchMock(
+          Response.json({
+            data: {
+              limits: [
+                { percentage: 50, type: "TOKENS_LIMIT", usage: 50 },
+                { percentage: 1, type: "TIME_LIMIT", usage: usageTotal },
+              ],
+            },
+          })
+        );
+
+        await expect(
+          fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000)
+        ).resolves.toMatchObject({ tierName });
+      }
+    );
+
+    it.each([
+      [1, "Lite"],
+      [50, "Lite"],
+      [100, "Lite"],
+      [299, "Lite"],
+    ] as const)(
+      "infers %s total prompts as Lite tier",
+      async (usageTotal, tierName) => {
+        installFetchMock(
+          Response.json({
+            data: {
+              limits: [
+                { percentage: 50, type: "TOKENS_LIMIT", usage: 50 },
+                { percentage: 1, type: "TIME_LIMIT", usage: usageTotal },
+              ],
+            },
+          })
+        );
+
+        await expect(
+          fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000)
+        ).resolves.toMatchObject({ tierName });
+      }
+    );
+
+    it("infers 0 total prompts as Unknown tier", async () => {
+      installFetchMock(
+        Response.json({
+          data: {
+            limits: [
+              { percentage: 50, type: "TOKENS_LIMIT", usage: 50 },
+              { percentage: 0, type: "TIME_LIMIT", usage: 0 },
+            ],
+          },
+        })
+      );
+
+      await expect(
+        fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000)
+      ).resolves.toSatisfy(({ tierName }) => tierName === undefined);
+    });
+
+    it("infers missing usage total as Unknown tier", async () => {
+      installFetchMock(
+        Response.json({
+          data: {
+            limits: [
+              { percentage: 50, type: "TOKENS_LIMIT", usage: 50 },
+              { percentage: 1, type: "TIME_LIMIT" },
+            ],
+          },
+        })
+      );
+
+      await expect(
+        fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000)
+      ).resolves.toSatisfy(({ tierName }) => tierName === undefined);
+    });
+  });
+
+  it("rejects missing keys and malformed responses", async () => {
+    await expect(fetchZaiCodingPlanUsage(undefined, {}, 1000)).rejects.toThrow(
+      "missing ZAI key"
+    );
+
+    installFetchMock(Response.json({ data: {} }));
+    await expect(
+      fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000)
+    ).rejects.toThrow("invalid ZAI usage");
+  });
+
+  it("ignores null limits but rejects a payload without a rolling limit", async () => {
+    installFetchMock(
+      Response.json({
+        data: {
+          limits: [null, { percentage: 50, type: "TIME_LIMIT", usage: 50 }],
+        },
+      })
+    );
+
+    await expect(
+      fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000)
+    ).rejects.toThrow("invalid ZAI usage");
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects invalid required token percentage %s",
+    async (percentage) => {
+      installFetchMock(
+        Response.json({
+          data: { limits: [{ percentage, type: "TOKENS_LIMIT" }] },
+        })
+      );
+
+      await expect(
+        fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000)
+      ).rejects.toThrow("invalid ZAI usage");
+    }
+  );
+
+  it("downgrades invalid optional counts to percentage usage", async () => {
+    installFetchMock(
+      Response.json({
+        data: {
+          limits: [
+            {
+              currentValue: -10,
+              percentage: 25,
+              type: "TOKENS_LIMIT",
+            },
+          ],
+        },
+      })
+    );
+
+    const usage = await fetchZaiCodingPlanUsage({ apiKey: "key" }, {}, 1000);
+    expect(usage.windows[0]?.quota._tag).toBe("Percentage");
+  });
+});

@@ -1,0 +1,36 @@
+import type { Effect } from "effect";
+
+import type { ProviderError } from "@/errors.ts";
+import type { ProviderRuntime } from "@/providers/runtime/index.ts";
+import type {
+  OpenCodeAuth,
+  ProviderConfigMap,
+  ProviderID,
+  ProviderUsage,
+} from "@/types.ts";
+import type { UsageWindowKind } from "@/usage.ts";
+
+type ProviderFetch<ID extends ProviderID> = (
+  config: ProviderConfigMap[ID] | undefined,
+  openCodeAuth: OpenCodeAuth,
+  timeoutMs: number
+) => Effect.Effect<ProviderUsage<ID>, ProviderError, ProviderRuntime>;
+
+/** Static metadata and adapter binding for one plugin provider. */
+export interface ProviderDefinition<ID extends ProviderID = ProviderID> {
+  /** Plugin provider identifier and config key. */
+  id: ID;
+  /** Default display label when config.label is omitted. */
+  defaultLabel: string;
+  /** Stable sidebar display order; lower values appear first. */
+  displayOrder: number;
+  /** Fetches normalized usage using the provider's required runtime services. */
+  fetch: ProviderFetch<ID>;
+  /**
+   * OpenCode session provider IDs that map to this plugin provider for the
+   * prompt footer. Empty means sidebar-only.
+   */
+  openCodeProviderIDs: readonly string[];
+  /** Preferred stable usage-window kind for the prompt footer. */
+  footerWindowKind: UsageWindowKind;
+}

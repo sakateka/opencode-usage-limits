@@ -1,0 +1,70 @@
+import { Result } from "effect";
+import { describe, expect, it } from "vitest";
+
+import { shouldRenderProviderState } from "@/components.tsx";
+import type { ProviderState, ProviderUsage } from "@/types.ts";
+import { parseUsagePercentage, percentageQuota } from "@/usage.ts";
+
+const providerUsage = (): ProviderUsage => ({
+  capturedAt: new Date("2026-07-02T12:00:00.000Z"),
+  id: "zai",
+  label: "Synthetic",
+  windows: [
+    {
+      kind: "rolling",
+      label: "5h",
+      quota: percentageQuota(Result.getOrThrow(parseUsagePercentage(0))),
+      resetsAt: null,
+    },
+  ],
+});
+
+describe("sidebar provider visibility", () => {
+  it("hides missing credential errors without cached usage", () => {
+    const state: ProviderState = {
+      errorKind: "missing_credentials",
+      id: "zai",
+      label: "Synthetic",
+      message: "missing Synthetic key",
+      status: "error",
+    };
+
+    expect(shouldRenderProviderState(state, true)).toBeFalsy();
+  });
+
+  it("keeps non-credential errors visible when error display is enabled", () => {
+    const state: ProviderState = {
+      id: "zai",
+      label: "Synthetic",
+      message: "invalid Synthetic usage",
+      status: "error",
+    };
+
+    expect(shouldRenderProviderState(state, true)).toBeTruthy();
+    expect(shouldRenderProviderState(state, false)).toBeFalsy();
+  });
+
+  it("keeps cached usage visible when a refresh hits missing credentials", () => {
+    const state: ProviderState = {
+      errorKind: "missing_credentials",
+      id: "zai",
+      label: "Synthetic",
+      message: "missing Synthetic key",
+      previous: providerUsage(),
+      status: "error",
+    };
+
+    expect(shouldRenderProviderState(state, true)).toBeTruthy();
+    expect(shouldRenderProviderState(state, false)).toBeTruthy();
+  });
+
+  it("hides disabled providers", () => {
+    const state: ProviderState = {
+      id: "zai",
+      label: "Synthetic",
+      status: "disabled",
+    };
+
+    expect(shouldRenderProviderState(state, true)).toBeFalsy();
+  });
+});

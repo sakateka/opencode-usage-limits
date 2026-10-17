@@ -1,0 +1,20 @@
+{
+  "$schema": "../usage-limits.schema.json",
+  "enabled": true,
+  "refreshIntervalSeconds": 60,
+  "requestTimeoutMs": 10000,
+  "showErrors": true,
+  "providers": {
+    "kimi": {
+      "enabled": true,
+      "label": "Kimi Code",
+      "showSidebarBar": true,
+      "showFooterBar": true,
+      "sidebarWindow": "all",
+      "footerWindow": "auto",
+      // Fallback when legacy OpenCode auth has no kimi-code-plan-global key.
+      // Set this variable in the environment of the OpenCode TUI process.
+      "apiKey": "{env:KIMI_CODE_API_KEY}",
+    },
+  },
+}

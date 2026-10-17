@@ -1,0 +1,12 @@
+node_modules/
+
+coverage/
+*.tgz
+
+# Local credentials and environment files must never be committed.
+.env
+.env.*
+!.env.example
+auth.json
+*.pem
+*.key

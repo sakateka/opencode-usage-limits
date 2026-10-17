@@ -1,0 +1,20 @@
+import { defineConfig } from "tsdown";
+
+export default defineConfig({
+  clean: true,
+  deps: {
+    neverBundle: [
+      "@opencode/plugin",
+      "@opencode/plugin/tui",
+      "@opentui/core",
+      "@opentui/solid",
+      "@opentui/solid/jsx-runtime",
+      "solid-js",
+      "solid-js/web",
+    ],
+  },
+  dts: true,
+  entry: ["src/index.ts"],
+  format: "esm",
+  outExtensions: () => ({ dts: ".d.mts", js: ".mjs" }),
+});

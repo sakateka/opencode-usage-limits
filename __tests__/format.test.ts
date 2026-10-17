@@ -1,0 +1,221 @@
+import { Result } from "effect";
+import { describe, expect, it } from "vitest";
+
+import {
+  bottomWindowMainText,
+  formatQuotaText,
+  formatTimestamp,
+  formatTokenCount,
+  limitLabelForWindow,
+  percentBar,
+  tokenCountText,
+  windowMainText,
+  windowResetText,
+  windowResetTime,
+} from "@/format.ts";
+import type { UsageWindow } from "@/types.ts";
+import type { UsageQuota } from "@/usage.ts";
+import {
+  balanceQuota,
+  countQuota,
+  parseUsageBalance,
+  parseUsageBalanceAmount,
+  parseUsageCount,
+  parseUsagePercentage,
+  percentageQuota,
+} from "@/usage.ts";
+
+const NOW = new Date("2026-06-23T11:00:00.000Z");
+
+const percentage = (usedPercent: number | null): UsageQuota =>
+  usedPercent === null
+    ? { _tag: "Unknown" }
+    : percentageQuota(Result.getOrThrow(parseUsagePercentage(usedPercent)));
+
+const usageWindow = (overrides: Partial<UsageWindow> = {}): UsageWindow => ({
+  kind: "rolling",
+  label: "5h",
+  quota: percentage(42),
+  resetsAt: new Date("2026-06-23T12:00:00.000Z"),
+  ...overrides,
+});
+
+describe("format helpers", () => {
+  it("formats usage window main labels", () => {
+    expect(windowMainText(usageWindow())).toBe("5h: 42%");
+    expect(bottomWindowMainText(usageWindow({ label: "daily" }))).toBe(
+      "daily 42%"
+    );
+  });
+
+  it("uses a placeholder for unknown percentages", () => {
+    expect(windowMainText(usageWindow({ quota: percentage(null) }))).toBe(
+      "5h: ?"
+    );
+  });
+
+  it("rounds percentages to the nearest integer", () => {
+    expect(windowMainText(usageWindow({ quota: percentage(42.49) }))).toBe(
+      "5h: 42%"
+    );
+    expect(windowMainText(usageWindow({ quota: percentage(42.5) }))).toBe(
+      "5h: 43%"
+    );
+  });
+
+  it("formats currency balances without percentages", () => {
+    const remaining = Result.getOrThrow(parseUsageBalance(12.34));
+    const quota = balanceQuota(remaining, "USD");
+    const window = usageWindow({ label: "USD balance", quota });
+
+    expect(windowMainText(window)).toBe("USD balance: $12.34 remaining");
+    expect(bottomWindowMainText(window)).toBe("USD balance $12.34 remaining");
+  });
+
+  it("formats unitized USD count quotas as spending amounts", () => {
+    const quota = countQuota(
+      Result.getOrThrow(parseUsageCount(25.5)),
+      Result.getOrThrow(parseUsageCount(100)),
+      Result.getOrThrow(parseUsagePercentage(25.5)),
+      "USD"
+    );
+
+    expect(
+      windowMainText(usageWindow({ label: "spend", quota, resetsAt: null }))
+    ).toBe("spend: $25.50 / $100.00 used");
+    expect(
+      bottomWindowMainText(
+        usageWindow({ label: "spend", quota, resetsAt: null })
+      )
+    ).toBe("spend $25.50 / $100.00 used");
+  });
+
+  it("appends used only to percentage-style component text", () => {
+    const quota = percentageQuota(Result.getOrThrow(parseUsagePercentage(42)));
+
+    expect(formatQuotaText(quota)).toBe("42%");
+    expect(formatQuotaText(quota, true)).toBe("42% used");
+  });
+
+  it("formats zero balances and preserves generic units", () => {
+    const zero = balanceQuota(Result.getOrThrow(parseUsageBalance(0)), "CNY");
+
+    const credits = balanceQuota(
+      Result.getOrThrow(parseUsageBalance(12.5)),
+      "credits"
+    );
+
+    expect(
+      windowMainText(usageWindow({ label: "CNY balance", quota: zero }))
+    ).toBe("CNY balance: ¥0.00 remaining");
+    expect(
+      bottomWindowMainText(usageWindow({ label: "credits", quota: credits }))
+    ).toBe("credits 12.5 credits remaining");
+  });
+
+  it("keeps tiny positive currency balances visible", () => {
+    const remaining = Result.getOrThrow(parseUsageBalance(0.004));
+    const quota = balanceQuota(remaining, "USD");
+
+    expect(windowMainText(usageWindow({ label: "USD balance", quota }))).toBe(
+      "USD balance: $<0.01 remaining"
+    );
+  });
+
+  it("renders zero and negative authoritative currency balances accurately", () => {
+    const negative = balanceQuota(
+      Result.getOrThrow(parseUsageBalanceAmount(-0.004)),
+      "USD"
+    );
+
+    const debt = balanceQuota(
+      Result.getOrThrow(parseUsageBalanceAmount(-12.5)),
+      "CNY"
+    );
+
+    expect(
+      windowMainText(usageWindow({ label: "USD balance", quota: negative }))
+    ).toBe("USD balance: -$<0.01 remaining");
+    expect(
+      windowMainText(usageWindow({ label: "CNY balance", quota: debt }))
+    ).toBe("CNY balance: -¥12.50 remaining");
+  });
+
+  it.each([
+    [null, ""],
+    [0, " · now"],
+    [1, " · 1m"],
+    [3600, " · 1h"],
+    [5400, " · 1.5h"],
+    [5460, " · 1h 31m"],
+    [86_400, " · 1d"],
+    [176_400, " · 2d 1h"],
+  ] as const)("formats a %s second reset duration", (seconds, expected) => {
+    const resetsAt =
+      seconds === null ? null : new Date(NOW.getTime() + seconds * 1000);
+
+    expect(windowResetText(usageWindow({ resetsAt }), NOW)).toBe(expected);
+  });
+
+  it("maps known limit windows with tolerance", () => {
+    expect(limitLabelForWindow(5 * 60 * 60, "fallback")).toBe("5h");
+    expect(
+      limitLabelForWindow(Math.floor(24 * 60 * 60 * 0.96), "fallback")
+    ).toBe("daily");
+    expect(limitLabelForWindow(7 * 24 * 60 * 60, "fallback")).toBe("weekly");
+    expect(limitLabelForWindow(30 * 24 * 60 * 60, "fallback")).toBe("monthly");
+    expect(limitLabelForWindow(42, "fallback")).toBe("fallback");
+  });
+
+  it("renders percent bar with filled and empty blocks", () => {
+    expect(percentBar(42, 12)).toBe("[█████░░░░░░░]");
+    expect(percentBar(75, 8)).toBe("[██████░░]");
+    expect(percentBar(null, 12)).toBe("[░░░░░░░░░░░░]");
+    expect(percentBar(0, 12)).toBe("[░░░░░░░░░░░░]");
+    expect(percentBar(100, 12)).toBe("[████████████]");
+  });
+
+  it("keeps a visible block for small positive usage", () => {
+    expect(percentBar(1, 12)).toBe("[█░░░░░░░░░░░]");
+  });
+
+  it.each([
+    [500, "500"],
+    [1000, "1K"],
+    [1500, "1.5K"],
+    [15_000, "15K"],
+    [1_000_000, "1M"],
+    [1_500_000, "1.5M"],
+    [15_000_000, "15M"],
+  ])("formats token count %s", (tokens, expected) => {
+    expect(formatTokenCount(tokens)).toBe(expected);
+  });
+
+  it("formats timestamp as HH:MM", () => {
+    expect(formatTimestamp(new Date(2026, 5, 25, 14, 32))).toBe("14:32");
+    expect(formatTimestamp(new Date(2026, 5, 25, 9, 5))).toBe("09:05");
+    expect(formatTimestamp(new Date(2026, 5, 25, 0, 0))).toBe("00:00");
+  });
+
+  it("renders token count text only for count quotas", () => {
+    expect(
+      tokenCountText(
+        usageWindow({
+          quota: countQuota(
+            Result.getOrThrow(parseUsageCount(1500)),
+            Result.getOrThrow(parseUsageCount(15_000)),
+            Result.getOrThrow(parseUsagePercentage(10))
+          ),
+        })
+      )
+    ).toBe(" (1.5K/15K)");
+    expect(tokenCountText(usageWindow())).toBe("");
+  });
+
+  it("formats absolute reset time", () => {
+    expect(
+      windowResetTime(usageWindow({ resetsAt: new Date(2026, 5, 23, 23, 59) }))
+    ).toBe(" 23:59");
+    expect(windowResetTime(usageWindow({ resetsAt: null }))).toBe("");
+  });
+});
