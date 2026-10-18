@@ -14,6 +14,13 @@ export default defineConfig({
   resolve: {
     alias: [
       {
+        find: /^solid-js$/,
+        // Match the reactive runtime imported by the OpenTUI renderer.
+        replacement: fileURLToPath(
+          new URL("node_modules/solid-js/dist/solid.js", import.meta.url)
+        ),
+      },
+      {
         find: "@",
         replacement: fileURLToPath(new URL("src", import.meta.url)),
       },

@@ -1,7 +1,7 @@
 {
   "$schema": "../usage-limits.schema.json",
   "enabled": true,
-  "refreshIntervalSeconds": 60,
+  "refreshIntervalSeconds": 300,
   "requestTimeoutMs": 10000,
   "showErrors": true,
   "providers": {

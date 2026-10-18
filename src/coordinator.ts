@@ -22,6 +22,8 @@ import type {
 } from "@/types.ts";
 
 export interface CoordinatorSnapshot {
+  /** Whether a refresh cycle is still in progress. */
+  readonly refreshing: boolean;
   /** Configuration or auth diagnostics to display. */
   readonly diagnostics: readonly ConfigDiagnostic[];
   /** Latest state for each configured provider. */
@@ -38,6 +40,8 @@ export interface CoordinatorSnapshot {
 
 /** Dependencies and observable effects for the periodic usage refresh loop. */
 export interface UsageCoordinatorDependencies {
+  /** Restricts polling to the selected provider; null disables provider requests. */
+  readonly activeProviderID?: Effect.Effect<ProviderID | null>;
   readonly loadConfig: Effect.Effect<
     Result.Result<ResolvedUsageLimitsConfig, unknown>
   >;
@@ -205,10 +209,18 @@ export const usageCoordinator = (
       const intervalMs = intervalMilliseconds(config.refreshIntervalSeconds);
       const staleAfterMs = intervalMs * 2;
       const refreshStartedAt = yield* dependencies.now;
-      const providers = config.enabled ? getProviderConfigs(config) : [];
+      const activeProviderID = dependencies.activeProviderID
+        ? yield* dependencies.activeProviderID
+        : undefined;
+      const providers = config.enabled
+        ? getProviderConfigs(config).filter(
+            ([id]) => activeProviderID === undefined || id === activeProviderID
+          )
+        : [];
       const providerIDs = new Set(providers.map(([id]) => id));
       clearDisabledProviderStates(providerIDs, lastStates, lastSuccess);
       yield* safePublish(dependencies, {
+        refreshing: true,
         diagnostics: configDiagnostic ? [configDiagnostic] : [],
         lastRefreshAt,
         providerDisplays: providerDisplaysFor(providers),
@@ -318,6 +330,7 @@ export const usageCoordinator = (
 
         cacheProviderStates(states, lastStates);
         yield* safePublish(dependencies, {
+          refreshing: false,
           diagnostics: authLoad.diagnostic ? [authLoad.diagnostic] : [],
           lastRefreshAt: now,
           providerDisplays: providerDisplaysFor(providers),
@@ -327,6 +340,7 @@ export const usageCoordinator = (
       } else {
         lastRefreshAt = null;
         yield* safePublish(dependencies, {
+          refreshing: false,
           diagnostics: configDiagnostic ? [configDiagnostic] : [],
           lastRefreshAt: null,
           providerDisplays: {},

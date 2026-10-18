@@ -12,8 +12,12 @@ processes or write credentials. Kimi Code is the default configuration example.
 ## What it does
 
 - Sidebar block `Usage Limits` under the Context section, refreshed every
-  `refreshIntervalSeconds` (default 60).
-- Prompt-footer indicator for the provider of the current session.
+  `refreshIntervalSeconds` (default 300 seconds / 5 minutes after each refresh).
+- Only the enabled provider of the prompt's selected model is queried. Switching
+  providers triggers an immediate refresh; unsupported providers make no requests.
+- Prompt-footer indicator keeps updating even while the sidebar is hidden.
+- `/limits` forces an immediate refresh and opens a live local limits dialog.
+  Neither the command nor its output is added to conversation history or model context.
 - Credentials are read from OpenCode auth (`~/.local/share/opencode/auth.json`)
   first; per-provider `apiKey`/`authPath` config and `{env:VAR}` references are
   fallbacks.
@@ -78,7 +82,7 @@ The same example is available in [`examples/usage-limits.jsonc`](examples/usage-
 ```jsonc
 {
   "enabled": true,
-  "refreshIntervalSeconds": 60,
+  "refreshIntervalSeconds": 300,
   "requestTimeoutMs": 10000,
   "showErrors": true,
   "providers": {

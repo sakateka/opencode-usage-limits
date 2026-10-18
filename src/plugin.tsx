@@ -1,7 +1,7 @@
 /* @jsxImportSource @opentui/solid */
 import type { JSX } from "@opentui/solid";
-import { Effect, Fiber } from "effect";
-import { createSignal } from "solid-js";
+import { Effect, Fiber, Queue } from "effect";
+import { createEffect, createRoot, createSignal, Show } from "solid-js";
 
 import { BottomUsage, UsageLimitsPanel } from "@/components.tsx";
 import type { UsageTheme } from "@/components.tsx";
@@ -11,18 +11,14 @@ import { usageCoordinator } from "@/coordinator.ts";
 import type { ProviderError } from "@/errors.ts";
 import { fetchProviderEffect } from "@/providers.ts";
 import { ProviderRuntimeLive } from "@/providers/runtime/index.ts";
-import {
-  currentProviderID,
-  usageForProvider,
-  usageProviderFor,
-} from "@/session.ts";
+import { pluginProviderForOpenCode } from "@/providers/index.ts";
+import { usageForProvider, usageProviderFor } from "@/session.ts";
 import type {
   ProviderID,
   OpenCodeAuth,
   ProviderConfigMap,
   ProviderUsage,
 } from "@/types.ts";
-import type { JsonValue } from "@/utils.ts";
 
 const SIDEBAR_SLOT = "sidebar.content" as const;
 const FOOTER_SLOT = "prompt.footer.status" as const;
@@ -59,23 +55,28 @@ interface UsageLimitsSlotClaim {
 }
 
 export interface UsageLimitsContext {
-  /** Session data used to determine the active provider. */
-  readonly data: {
-    readonly session: {
-      readonly get: (sessionID: string) =>
-        | {
-            readonly model?: { readonly providerID?: string };
-          }
-        | undefined;
-      readonly message: {
-        readonly list: (sessionID: string) => readonly JsonValue[];
-      };
-    };
+  readonly keymap: {
+    readonly layer: (factory: () => {
+      mode: "global";
+      commands: readonly {
+        id: string;
+        title: string;
+        palette: true;
+        slash: { name: string };
+        run: () => void;
+      }[];
+    }) => void;
   };
   /** Current OpenCode theme used by plugin UI components. */
   readonly theme: UsageTheme;
   /** Registers UI contributions and returns a disposer for each slot. */
   readonly ui: {
+    readonly model: {
+      readonly current: () => { readonly providerID: string } | undefined;
+    };
+    readonly dialog: {
+      readonly show: (render: () => JSX.Element) => void;
+    };
     readonly slot: (claim: UsageLimitsSlotClaim) => () => void;
   };
 }
@@ -84,7 +85,7 @@ export interface UsageLimitsContext {
  * Creates provider runtime dependencies backed by the production services.
  *
  * @param loaders - Optional configuration and auth loader overrides.
- * @returns Dependencies using production HTTP, filesystem, and command services.
+ * @returns Dependencies using production HTTP and filesystem services.
  */
 export const makeProductionDependencies = (
   loaders?: Pick<UsageLimitsTuiDependencies, "loadConfig" | "loadOpenCodeAuth">
@@ -107,7 +108,7 @@ const productionDependencies = makeProductionDependencies();
 /**
  * Creates the OpenCode TUI plugin with explicit runtime dependencies.
  *
- * The plugin periodically loads configuration, fetches enabled provider usage,
+ * The plugin periodically loads configuration, fetches the active provider's usage,
  * stores the latest successful result for stale/error fallback, and registers UI
  * slots for both the sidebar panel and prompt-footer indicator.
  *
@@ -117,7 +118,30 @@ const productionDependencies = makeProductionDependencies();
 export const createUsageLimitsPlugin =
   (dependencies: UsageLimitsTuiDependencies) =>
   (context: UsageLimitsContext): (() => void) => {
+    let disposed = false;
+    const refreshRequests = Effect.runSync(Queue.sliding<void>(1));
+    const requestRefresh = () => {
+      if (!disposed) {
+        Queue.offerUnsafe(refreshRequests, undefined);
+      }
+    };
+    const activeProvider = () => {
+      const providerID = context.ui.model.current()?.providerID;
+      return providerID ? pluginProviderForOpenCode(providerID) : null;
+    };
+    let previousProvider = activeProvider();
+    const disposeWatcher = createRoot((dispose) => {
+      createEffect(() => {
+        const provider = activeProvider();
+        if (provider !== previousProvider) {
+          previousProvider = provider;
+          requestRefresh();
+        }
+      });
+      return dispose;
+    });
     const [snapshot, setSnapshot] = createSignal<CoordinatorSnapshot>({
+      refreshing: false,
       diagnostics: [],
       lastRefreshAt: null,
       providerDisplays: {},
@@ -128,14 +152,18 @@ export const createUsageLimitsPlugin =
     const disposeSidebar = context.ui.slot({
       append: SIDEBAR_SLOT,
       render: () => (
-        <UsageLimitsPanel
-          diagnostics={snapshot().diagnostics}
-          providerDisplays={snapshot().providerDisplays}
-          showErrors={snapshot().showErrors}
-          states={snapshot().states}
-          theme={context.theme}
-          lastRefreshAt={snapshot().lastRefreshAt}
-        />
+        <Show when={snapshot()} keyed>
+          {(current) => (
+            <UsageLimitsPanel
+              diagnostics={current.diagnostics}
+              providerDisplays={current.providerDisplays}
+              showErrors={current.showErrors}
+              states={current.states}
+              theme={context.theme}
+              lastRefreshAt={current.lastRefreshAt}
+            />
+          )}
+        </Show>
       ),
     });
 
@@ -146,30 +174,24 @@ export const createUsageLimitsPlugin =
           return null;
         }
 
-        const session = context.data.session.get(slot.sessionID);
+        const providerID = () => context.ui.model.current()?.providerID;
 
-        const providerID =
-          session?.model?.providerID ??
-          currentProviderID(context.data.session.message.list(slot.sessionID));
-
-        const selectedProviderID = usageProviderFor(
-          snapshot().states,
-          providerID,
-          snapshot().providerDisplays
-        );
+        const display = () => {
+          const id = usageProviderFor(
+            snapshot().states,
+            providerID(),
+            snapshot().providerDisplays
+          );
+          return id ? snapshot().providerDisplays[id] : undefined;
+        };
 
         return (
           <BottomUsage
             theme={context.theme}
-            showBar={
-              selectedProviderID
-                ? snapshot().providerDisplays[selectedProviderID]
-                    ?.showFooterBar !== false
-                : true
-            }
+            showBar={display()?.showFooterBar !== false}
             window={usageForProvider(
               snapshot().states,
-              providerID,
+              providerID(),
               snapshot().providerDisplays
             )}
           />
@@ -178,18 +200,83 @@ export const createUsageLimitsPlugin =
     });
 
     const coordinator = usageCoordinator({
+      activeProviderID: Effect.sync(activeProvider),
       fetchProvider: dependencies.fetchProvider,
       loadConfig: Effect.promise(() => dependencies.loadConfig()),
       loadOpenCodeAuth: Effect.promise(() => dependencies.loadOpenCodeAuth()),
       now: Effect.sync(dependencies.now),
       publish: (nextSnapshot) => Effect.sync(() => setSnapshot(nextSnapshot)),
       sleep: (milliseconds) =>
-        dependencies.sleep?.(milliseconds) ?? Effect.sleep(milliseconds),
+        Effect.raceFirst(
+          dependencies.sleep?.(milliseconds) ?? Effect.sleep(milliseconds),
+          Queue.take(refreshRequests)
+        ),
     });
 
     const fiber = Effect.runFork(Effect.scoped(coordinator));
 
+    context.keymap.layer(() => ({
+      mode: "global",
+      commands: [
+        {
+          id: "usage-limits.refresh",
+          title: "Refresh usage limits",
+          palette: true,
+          slash: { name: "limits" },
+          run: () => {
+            if (disposed) {
+              return;
+            }
+            requestRefresh();
+            context.ui.dialog.show(() => (
+              <box flexDirection="column">
+                <Show when={snapshot()} keyed>
+                  {(current) => (
+                    <>
+                      {current.refreshing ? (
+                        <text>Refreshing limits...</text>
+                      ) : null}
+                      <UsageLimitsPanel
+                        diagnostics={[
+                          ...current.diagnostics,
+                          ...current.states.flatMap((state) =>
+                            state.status === "error" &&
+                            state.errorKind === "missing_credentials"
+                              ? [{
+                                  kind: "auth-missing" as const,
+                                  message: state.message,
+                                }]
+                              : []
+                          ),
+                        ]}
+                        states={current.states}
+                        providerDisplays={current.providerDisplays}
+                        showErrors={true}
+                        theme={context.theme}
+                        lastRefreshAt={current.lastRefreshAt}
+                      />
+                      {!current.refreshing &&
+                      current.states.length === 0 &&
+                      current.diagnostics.length === 0 ? (
+                        <text>No enabled usage provider for the selected model.</text>
+                      ) : null}
+                    </>
+                  )}
+                </Show>
+                <text>Escape to close. Not added to the conversation.</text>
+              </box>
+            ));
+          },
+        },
+      ],
+    }));
+
     return () => {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      disposeWatcher();
       disposeSidebar();
       disposeFooter();
       Effect.runFork(Fiber.interrupt(fiber));

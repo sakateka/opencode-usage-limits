@@ -1,6 +1,6 @@
 /* @jsxImportSource @opentui/solid */
 import type { RGBA } from "@opentui/core";
-import { createMemo, For } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 
 import type { ConfigDiagnostic } from "@/config.ts";
 import {
@@ -327,31 +327,28 @@ export const BottomUsage = (props: {
 }) => {
   const colors = resolveTheme(props.theme);
 
-  if (!props.window) {
-    return null;
-  }
-
-  const usedPercent = quotaUsedPercent(props.window.quota);
-  const showBar = props.showBar && props.window.quota._tag !== "Balance";
-
   return (
-    <text>
-      {showBar ? (
-        <span
-          style={{
-            fg: dotColor(usedPercent, colors),
-          }}
-        >
-          {percentBar(usedPercent, 8)}
-        </span>
-      ) : null}
-      <span style={{ fg: colors.text }}>
-        {" "}
-        {bottomWindowMainText(props.window)}
-      </span>
-      <span style={{ fg: colors.subdued }}>
-        {windowResetText(props.window)}
-      </span>
-    </text>
+    <Show when={props.window} keyed>
+      {(window) => {
+        const usedPercent = quotaUsedPercent(window.quota);
+
+        return (
+          <text>
+            {props.showBar && window.quota._tag !== "Balance" ? (
+              <span style={{ fg: dotColor(usedPercent, colors) }}>
+                {percentBar(usedPercent, 8)}
+              </span>
+            ) : null}
+            <span style={{ fg: colors.text }}>
+              {" "}
+              {bottomWindowMainText(window)}
+            </span>
+            <span style={{ fg: colors.subdued }}>
+              {windowResetText(window)}
+            </span>
+          </text>
+        );
+      }}
+    </Show>
   );
 };

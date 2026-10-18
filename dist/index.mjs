@@ -1,7 +1,7 @@
 import { Plugin } from "@opencode/plugin/tui";
-import { Cause, Clock, Context, Effect, Fiber, Layer, Redacted, Result, Schema } from "effect";
-import { For, createMemo, createSignal } from "solid-js";
-import { jsx, jsxs } from "@opentui/solid/jsx-runtime";
+import { Cause, Clock, Context, Effect, Fiber, Layer, Queue, Redacted, Result, Schema } from "effect";
+import { For, Show, createEffect, createMemo, createRoot, createSignal } from "solid-js";
+import { Fragment, jsx, jsxs } from "@opentui/solid/jsx-runtime";
 import { homedir } from "node:os";
 import path from "node:path";
 import { open, readFile } from "node:fs/promises";
@@ -426,23 +426,27 @@ const UsageLimitsPanel = (props) => {
 */
 const BottomUsage = (props) => {
 	const colors = resolveTheme(props.theme);
-	if (!props.window) return null;
-	const usedPercent = quotaUsedPercent(props.window.quota);
-	const showBar = props.showBar && props.window.quota._tag !== "Balance";
-	return /* @__PURE__ */ jsxs("text", { children: [
-		showBar ? /* @__PURE__ */ jsx("span", {
-			style: { fg: dotColor(usedPercent, colors) },
-			children: percentBar(usedPercent, 8)
-		}) : null,
-		/* @__PURE__ */ jsxs("span", {
-			style: { fg: colors.text },
-			children: [" ", bottomWindowMainText(props.window)]
-		}),
-		/* @__PURE__ */ jsx("span", {
-			style: { fg: colors.subdued },
-			children: windowResetText(props.window)
-		})
-	] });
+	return /* @__PURE__ */ jsx(Show, {
+		when: props.window,
+		keyed: true,
+		children: (window) => {
+			const usedPercent = quotaUsedPercent(window.quota);
+			return /* @__PURE__ */ jsxs("text", { children: [
+				props.showBar && window.quota._tag !== "Balance" ? /* @__PURE__ */ jsx("span", {
+					style: { fg: dotColor(usedPercent, colors) },
+					children: percentBar(usedPercent, 8)
+				}) : null,
+				/* @__PURE__ */ jsxs("span", {
+					style: { fg: colors.text },
+					children: [" ", bottomWindowMainText(window)]
+				}),
+				/* @__PURE__ */ jsx("span", {
+					style: { fg: colors.subdued },
+					children: windowResetText(window)
+				})
+			] });
+		}
+	});
 };
 //#endregion
 //#region src/errors-shared.ts
@@ -792,7 +796,7 @@ const configSchema = Schema.Struct({
 	$schema: Schema.optionalKey(Schema.String),
 	enabled: defaultKey(Schema.Boolean, true),
 	providers: defaultKey(providersSchema, {}),
-	refreshIntervalSeconds: defaultKey(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(15)), 60),
+	refreshIntervalSeconds: defaultKey(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(15)), 300),
 	requestTimeoutMs: defaultKey(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(1e3)), 1e4),
 	showErrors: defaultKey(Schema.Boolean, true)
 });
@@ -894,7 +898,7 @@ const OPENCODE_AUTH_PATH = defaultOpenCodeAuthPath(process.platform, process.env
 const DEFAULT_CONFIG = {
 	enabled: true,
 	providers: {},
-	refreshIntervalSeconds: 60,
+	refreshIntervalSeconds: 300,
 	requestTimeoutMs: 1e4,
 	showErrors: true
 };
@@ -2011,10 +2015,12 @@ const usageCoordinator = (dependencies) => Effect.gen(function* coordinatorLoop(
 		const intervalMs = intervalMilliseconds(config.refreshIntervalSeconds);
 		const staleAfterMs = intervalMs * 2;
 		const refreshStartedAt = yield* dependencies.now;
-		const providers = config.enabled ? getProviderConfigs(config) : [];
+		const activeProviderID = dependencies.activeProviderID ? yield* dependencies.activeProviderID : void 0;
+		const providers = config.enabled ? getProviderConfigs(config).filter(([id]) => activeProviderID === void 0 || id === activeProviderID) : [];
 		const providerIDs = new Set(providers.map(([id]) => id));
 		clearDisabledProviderStates(providerIDs, lastStates, lastSuccess);
 		yield* safePublish(dependencies, {
+			refreshing: true,
 			diagnostics: configDiagnostic ? [configDiagnostic] : [],
 			lastRefreshAt,
 			providerDisplays: providerDisplaysFor(providers),
@@ -2075,6 +2081,7 @@ const usageCoordinator = (dependencies) => Effect.gen(function* coordinatorLoop(
 			} : state);
 			cacheProviderStates(states, lastStates);
 			yield* safePublish(dependencies, {
+				refreshing: false,
 				diagnostics: authLoad.diagnostic ? [authLoad.diagnostic] : [],
 				lastRefreshAt: now,
 				providerDisplays: providerDisplaysFor(providers),
@@ -2084,6 +2091,7 @@ const usageCoordinator = (dependencies) => Effect.gen(function* coordinatorLoop(
 		} else {
 			lastRefreshAt = null;
 			yield* safePublish(dependencies, {
+				refreshing: false,
 				diagnostics: configDiagnostic ? [configDiagnostic] : [],
 				lastRefreshAt: null,
 				providerDisplays: {},
@@ -2096,26 +2104,6 @@ const usageCoordinator = (dependencies) => Effect.gen(function* coordinatorLoop(
 });
 //#endregion
 //#region src/session.ts
-const getProviderFromMessage = (message) => {
-	if (!isRecord(message)) return;
-	const info = isRecord(message.info) ? message.info : message;
-	if (isString(info.providerID)) return info.providerID;
-	if (isRecord(info.model) && isString(info.model.providerID)) return info.model.providerID;
-	if (isString(message.providerID)) return message.providerID;
-	if (isRecord(message.model) && isString(message.model.providerID)) return message.model.providerID;
-};
-/**
-* Finds the provider ID on the newest session message that includes one.
-*
-* @param messages - Session messages ordered from oldest to newest.
-* @returns The most recent provider ID, or `undefined` if none is present.
-*/
-const currentProviderID = (messages) => {
-	for (let index = messages.length - 1; index >= 0; index -= 1) {
-		const providerID = getProviderFromMessage(messages[index]);
-		if (providerID) return providerID;
-	}
-};
 const windowFromState = (state) => {
 	if (!state) return;
 	if (state.status === "ready") return state.data;
@@ -2183,7 +2171,7 @@ const FOOTER_SLOT = "prompt.footer.status";
 * Creates provider runtime dependencies backed by the production services.
 *
 * @param loaders - Optional configuration and auth loader overrides.
-* @returns Dependencies using production HTTP, filesystem, and command services.
+* @returns Dependencies using production HTTP and filesystem services.
 */
 const makeProductionDependencies = (loaders) => {
 	const selectedLoaders = loaders ?? {
@@ -2201,7 +2189,7 @@ const productionDependencies = makeProductionDependencies();
 /**
 * Creates the OpenCode TUI plugin with explicit runtime dependencies.
 *
-* The plugin periodically loads configuration, fetches enabled provider usage,
+* The plugin periodically loads configuration, fetches the active provider's usage,
 * stores the latest successful result for stale/error fallback, and registers UI
 * slots for both the sidebar panel and prompt-footer indicator.
 *
@@ -2209,7 +2197,28 @@ const productionDependencies = makeProductionDependencies();
 * @returns A setup function that registers slots and starts the refresh loop.
 */
 const createUsageLimitsPlugin = (dependencies) => (context) => {
+	let disposed = false;
+	const refreshRequests = Effect.runSync(Queue.sliding(1));
+	const requestRefresh = () => {
+		if (!disposed) Queue.offerUnsafe(refreshRequests, void 0);
+	};
+	const activeProvider = () => {
+		const providerID = context.ui.model.current()?.providerID;
+		return providerID ? pluginProviderForOpenCode(providerID) : null;
+	};
+	let previousProvider = activeProvider();
+	const disposeWatcher = createRoot((dispose) => {
+		createEffect(() => {
+			const provider = activeProvider();
+			if (provider !== previousProvider) {
+				previousProvider = provider;
+				requestRefresh();
+			}
+		});
+		return dispose;
+	});
 	const [snapshot, setSnapshot] = createSignal({
+		refreshing: false,
 		diagnostics: [],
 		lastRefreshAt: null,
 		providerDisplays: {},
@@ -2218,38 +2227,84 @@ const createUsageLimitsPlugin = (dependencies) => (context) => {
 	});
 	const disposeSidebar = context.ui.slot({
 		append: SIDEBAR_SLOT,
-		render: () => /* @__PURE__ */ jsx(UsageLimitsPanel, {
-			diagnostics: snapshot().diagnostics,
-			providerDisplays: snapshot().providerDisplays,
-			showErrors: snapshot().showErrors,
-			states: snapshot().states,
-			theme: context.theme,
-			lastRefreshAt: snapshot().lastRefreshAt
+		render: () => /* @__PURE__ */ jsx(Show, {
+			when: snapshot(),
+			keyed: true,
+			children: (current) => /* @__PURE__ */ jsx(UsageLimitsPanel, {
+				diagnostics: current.diagnostics,
+				providerDisplays: current.providerDisplays,
+				showErrors: current.showErrors,
+				states: current.states,
+				theme: context.theme,
+				lastRefreshAt: current.lastRefreshAt
+			})
 		})
 	});
 	const disposeFooter = context.ui.slot({
 		append: FOOTER_SLOT,
 		render: (slot) => {
 			if (!slot.sessionID || slot.mode === "shell") return null;
-			const providerID = context.data.session.get(slot.sessionID)?.model?.providerID ?? currentProviderID(context.data.session.message.list(slot.sessionID));
-			const selectedProviderID = usageProviderFor(snapshot().states, providerID, snapshot().providerDisplays);
+			const providerID = () => context.ui.model.current()?.providerID;
+			const display = () => {
+				const id = usageProviderFor(snapshot().states, providerID(), snapshot().providerDisplays);
+				return id ? snapshot().providerDisplays[id] : void 0;
+			};
 			return /* @__PURE__ */ jsx(BottomUsage, {
 				theme: context.theme,
-				showBar: selectedProviderID ? snapshot().providerDisplays[selectedProviderID]?.showFooterBar !== false : true,
-				window: usageForProvider(snapshot().states, providerID, snapshot().providerDisplays)
+				showBar: display()?.showFooterBar !== false,
+				window: usageForProvider(snapshot().states, providerID(), snapshot().providerDisplays)
 			});
 		}
 	});
 	const coordinator = usageCoordinator({
+		activeProviderID: Effect.sync(activeProvider),
 		fetchProvider: dependencies.fetchProvider,
 		loadConfig: Effect.promise(() => dependencies.loadConfig()),
 		loadOpenCodeAuth: Effect.promise(() => dependencies.loadOpenCodeAuth()),
 		now: Effect.sync(dependencies.now),
 		publish: (nextSnapshot) => Effect.sync(() => setSnapshot(nextSnapshot)),
-		sleep: (milliseconds) => dependencies.sleep?.(milliseconds) ?? Effect.sleep(milliseconds)
+		sleep: (milliseconds) => Effect.raceFirst(dependencies.sleep?.(milliseconds) ?? Effect.sleep(milliseconds), Queue.take(refreshRequests))
 	});
 	const fiber = Effect.runFork(Effect.scoped(coordinator));
+	context.keymap.layer(() => ({
+		mode: "global",
+		commands: [{
+			id: "usage-limits.refresh",
+			title: "Refresh usage limits",
+			palette: true,
+			slash: { name: "limits" },
+			run: () => {
+				if (disposed) return;
+				requestRefresh();
+				context.ui.dialog.show(() => /* @__PURE__ */ jsxs("box", {
+					flexDirection: "column",
+					children: [/* @__PURE__ */ jsx(Show, {
+						when: snapshot(),
+						keyed: true,
+						children: (current) => /* @__PURE__ */ jsxs(Fragment, { children: [
+							current.refreshing ? /* @__PURE__ */ jsx("text", { children: "Refreshing limits..." }) : null,
+							/* @__PURE__ */ jsx(UsageLimitsPanel, {
+								diagnostics: [...current.diagnostics, ...current.states.flatMap((state) => state.status === "error" && state.errorKind === "missing_credentials" ? [{
+									kind: "auth-missing",
+									message: state.message
+								}] : [])],
+								states: current.states,
+								providerDisplays: current.providerDisplays,
+								showErrors: true,
+								theme: context.theme,
+								lastRefreshAt: current.lastRefreshAt
+							}),
+							!current.refreshing && current.states.length === 0 && current.diagnostics.length === 0 ? /* @__PURE__ */ jsx("text", { children: "No enabled usage provider for the selected model." }) : null
+						] })
+					}), /* @__PURE__ */ jsx("text", { children: "Escape to close. Not added to the conversation." })]
+				}));
+			}
+		}]
+	}));
 	return () => {
+		if (disposed) return;
+		disposed = true;
+		disposeWatcher();
 		disposeSidebar();
 		disposeFooter();
 		Effect.runFork(Fiber.interrupt(fiber));

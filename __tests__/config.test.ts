@@ -292,7 +292,7 @@ describe("configuration loading", () => {
     const result = await loadConfig(readJsonFile);
     const success = Result.isSuccess(result) ? result.success : undefined;
     expect(Result.isSuccess(result)).toBeTruthy();
-    expect(success?.refreshIntervalSeconds).toBe(60);
+    expect(success?.refreshIntervalSeconds).toBe(300);
     expect(readJsonFile).toHaveBeenCalledWith(
       path.join(testXdgConfigHome, "opencode", "usage-limits.jsonc")
     );

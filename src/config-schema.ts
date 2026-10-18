@@ -102,7 +102,7 @@ const configSchema = Schema.Struct({
   providers: defaultKey(providersSchema, {}),
   refreshIntervalSeconds: defaultKey(
     Schema.Finite.check(Schema.isGreaterThanOrEqualTo(15)),
-    60
+    300
   ),
   requestTimeoutMs: defaultKey(
     Schema.Finite.check(Schema.isGreaterThanOrEqualTo(1000)),

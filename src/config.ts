@@ -68,7 +68,7 @@ const OPENCODE_AUTH_PATH = defaultOpenCodeAuthPath(
 export const DEFAULT_CONFIG: ResolvedUsageLimitsConfig = {
   enabled: true,
   providers: {},
-  refreshIntervalSeconds: 60,
+  refreshIntervalSeconds: 300,
   requestTimeoutMs: 10_000,
   showErrors: true,
 };

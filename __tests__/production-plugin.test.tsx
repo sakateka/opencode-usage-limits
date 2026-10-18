@@ -55,14 +55,11 @@ describe("production plugin dependencies", () => {
     const claims: string[] = [];
 
     const context: UsageLimitsContext = {
-      data: {
-        session: {
-          get: () => undefined,
-          message: { list: () => [] },
-        },
-      },
+      keymap: { layer: () => {} },
       theme,
       ui: {
+        model: { current: () => ({ providerID: "zai-coding-plan" }) },
+        dialog: { show: () => {} },
         slot: (claim) => {
           claims.push(claim.append);
 
